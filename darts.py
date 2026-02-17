@@ -19,6 +19,12 @@ class DartsGep:
         self.history_list = None
         self.history_scrollbar = None
         self.last_change_index = None
+        # Nyílszámlálás
+        self.start_turn_score = self.score
+        self.darts_used_total = 0
+        self.darts_in_turn = 0  # 0–3, aktuális körben elhasznált nyilak
+        self.darts_turn_label = None
+        self.darts_total_label = None
         # Kommunikáció a hangfelismerő szál és a UI között
         self.command_queue = queue.Queue()
         self.running = True
@@ -61,6 +67,16 @@ class DartsGep:
         self.score_label = ttk.Label(self.root, text=str(self.score), font=("Segoe UI", 120, "bold"))
         self.score_label.pack(pady=(40, 10))
 
+        # Nyilak kijelzése (aktuális kör + összes)
+        darts_frame = ttk.Frame(self.root)
+        darts_frame.pack(pady=(0, 20))
+
+        self.darts_turn_label = ttk.Label(darts_frame, text="", font=("Segoe UI", 20, "bold"))
+        self.darts_turn_label.pack(side=tk.LEFT, padx=20)
+
+        self.darts_total_label = ttk.Label(darts_frame, text="", font=("Segoe UI", 20))
+        self.darts_total_label.pack(side=tk.LEFT, padx=20)
+
         # Kiszálló kijelzés (ha van javaslat) – közepes méretben
         self.checkout_label = ttk.Label(self.root, text="Kiszálló: -", font=("Segoe UI", 32, "bold"), foreground="#006400")
         self.checkout_label.pack(pady=(0, 30))
@@ -87,10 +103,19 @@ class DartsGep:
 
         # Kezdeti állapot a history-ban
         self.add_history_entry("Kezdő pontszám", self.score, highlight=True)
+        # Nyilak UI induló értékekkel
+        self.update_darts_ui()
 
     def update_score_ui(self):
         if self.score_label is not None:
             self.score_label.config(text=str(self.score))
+
+    def update_darts_ui(self):
+        """Aktuális kör nyilai és összes nyíl frissítése a UI-n."""
+        if self.darts_turn_label is not None:
+            self.darts_turn_label.config(text=f"Kör nyilai: {self.darts_in_turn} / 3")
+        if self.darts_total_label is not None:
+            self.darts_total_label.config(text=f"Összes nyíl: {self.darts_used_total}")
 
     def update_checkout_ui(self, tipp: str | None):
         if self.checkout_label is None:
@@ -481,16 +506,19 @@ class DartsGep:
                     self.root.destroy()
                 return
 
-            # ÚJRAINDÍTÁS (RESET): vissza 501-re, history törlése, UI frissítése
+            # ÚJRAINDÍTÁS (RESET): vissza 501-re, history + nyilak törlése, UI frissítése
             if dobas == "RESET":
                 self.score = 501
                 self.history.clear()
+                self.darts_used_total = 0
+                self.darts_in_turn = 0
                 # History lista vizuális törlése
                 if self.history_list is not None:
                     self.history_list.delete(0, tk.END)
                 # Kezdő állapot újra
                 self.update_score_ui()
                 self.update_checkout_ui(None)
+                self.update_darts_ui()
                 self.add_history_entry("Kezdő pontszám", self.score, highlight=True)
                 continue
 
@@ -499,37 +527,55 @@ class DartsGep:
                 if self.history:
                     elozo_allas = self.history.pop()
                     self.score = elozo_allas
-                    self.update_score_ui()
-                    self.add_history_entry("Visszavonás", self.score, highlight=True)
+                    if self.darts_in_turn > 0:
+                        self.darts_in_turn = self.darts_in_turn - 1
+                    else:
+                        self.darts_in_turn = 2
+                self.darts_used_total = self.darts_used_total - 1
+                self.update_darts_ui()
+                self.update_score_ui()
+                self.add_history_entry("Visszavonás", self.score, highlight=True)
                 # Ha nincs history, egyszerűen nem csinálunk semmit
                 continue
 
             # Ha nem értette pontosan – marad a jelenlegi állás
             if dobas is None:
-                # Negáló hang a félresikerült felismerésre
-                self.play_error_sound()
+                # Nincs változás, nincs hang
                 continue
 
-            # Besokallás ellenőrzése
-            if dobas > self.score or (self.score - dobas) == 1:
-                # Besokallás: nem változtatjuk az állást, csak új kört várunk
-                self.play_error_sound()
+            # Besokallás ellenőrzése (0 alá esés is)
+            remaining = self.score - dobas
+            if dobas > self.score or remaining == 1 or remaining < 0:
+                # Besokallás: a teljes kör 3 elhasznált nyílnak számít
+                darts_to_add = max(0, 3 - self.darts_in_turn)
+                self.darts_used_total += darts_to_add
+                self.darts_in_turn = 0
+                self.score = self.start_turn_score
+                self.update_score_ui()
+                self.update_darts_ui()
+                self.play_success_sound()
+                self.add_history_entry(f"Besokallás (dobás: {dobas})", self.score, highlight=True)
                 continue
+
+            # Sikeres dobás: nyilak növelése
+            self.darts_in_turn += 1
+            self.darts_used_total += 1
 
             # Visszavonás támogatás: elmentjük az előző állást
             self.history.append(self.score)
-            self.add_history_entry(f"Dobás -{dobas}", self.score - dobas, highlight=False)
-            self.score -= dobas
+            self.add_history_entry(f"Dobás -{dobas}", remaining, highlight=False)
+            self.score = remaining
 
             # UI frissítése az új állásra
             self.update_score_ui()
+            self.update_darts_ui()
             # Sikeres levonás hang
             self.play_success_sound()
             if self.score == 0:
                 self.add_history_entry("Játék vége", self.score, highlight=True)
                 self.running = False
-                if self.root is not None and self.root.winfo_exists():
-                    self.root.destroy()
+                #if self.root is not None and self.root.winfo_exists():
+                #    self.root.destroy()
                 return
 
             self.add_history_entry("Új állás", self.score, highlight=True)
@@ -544,6 +590,12 @@ class DartsGep:
             else:
                 # Nem vagy kiszálló zónában
                 self.update_checkout_ui(None)
+
+            # Ha letelt a 3 nyíl és még nincs kiszálló, új kört kezdünk
+            if self.score > 0 and self.darts_in_turn >= 3:
+                self.start_turn_score = self.score
+                self.darts_in_turn = 0
+                self.update_darts_ui()
 
         # Ha még fut a játék és az ablak él, ütemezzük újra magunkat
         if self.running and self.root is not None and self.root.winfo_exists() and self.score > 1:
@@ -583,6 +635,10 @@ class DartsGep:
     def jatek(self):
         # UI inicializálása
         self.init_ui()
+        # Nyilak alaphelyzetbe (biztonság kedvéért)
+        self.darts_used_total = 0
+        self.darts_in_turn = 0
+        self.update_darts_ui()
 
         # Hangfelismerő szál indítása
         listener_thread = threading.Thread(target=self.listen_loop, daemon=True)
